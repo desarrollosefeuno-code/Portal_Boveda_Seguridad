@@ -506,3 +506,4 @@ export const PasswordsView: React.FC<PasswordsViewProps> = ({
     </div>
   );
 };
+

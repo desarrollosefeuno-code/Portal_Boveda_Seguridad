@@ -178,3 +178,4 @@ export function verifyVaultSessionToken(token: string): { valid: boolean; email?
     return { valid: false };
   }
 }
+

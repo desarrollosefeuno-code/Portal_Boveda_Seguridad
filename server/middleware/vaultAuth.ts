@@ -23,3 +23,4 @@ export function requireVaultUnlocked(req: Request, res: Response, next: NextFunc
 
   next();
 }
+

@@ -310,3 +310,4 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
     </div>
   );
 };
+

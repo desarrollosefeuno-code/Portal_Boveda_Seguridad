@@ -272,3 +272,4 @@ export const AuditLogView: React.FC<AuditLogViewProps> = ({ showToast }) => {
     </div>
   );
 };
+

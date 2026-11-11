@@ -145,3 +145,4 @@ async function seedDefaultPin(): Promise<void> {
     console.log(`🔐 PIN Maestro de 4 dígitos inicial configurado por defecto: ${defaultPin}`);
   }
 }
+

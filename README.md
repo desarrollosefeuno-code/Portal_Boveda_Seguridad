@@ -127,3 +127,4 @@ Ejecuta la suite criptográfica verificando cifrado AES-256-GCM, rechazo de mani
 
 * **OWASP ASVS Level 2:** Cifrado autenticado para todo dato en reposo, cookies `HttpOnly`, `SameSite=Strict`, prevención de inyecciones SQL con consultas parametrizadas, tokens efímeros firmados y cabeceras estrictas (`nosniff`, `DENY`, `HSTS`).
 * **Calificación SecurityScorecard:** Apto para máxima calificación en seguridad corporativa.
+

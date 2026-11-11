@@ -95,3 +95,4 @@ export function calculatePasswordStrength(password: string): PasswordStrength {
   }
   return { score: 100, label: 'Ultra-Segura', colorClass: 'text-indigo-400', barClass: 'bg-indigo-500' };
 }
+

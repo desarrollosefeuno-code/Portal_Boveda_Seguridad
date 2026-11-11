@@ -55,3 +55,4 @@ export async function logAuditEvent(params: AuditLogParams): Promise<void> {
     console.error('Error al registrar evento de auditoría:', err);
   }
 }
+

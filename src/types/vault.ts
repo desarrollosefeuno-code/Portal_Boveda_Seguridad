@@ -80,3 +80,4 @@ export interface User {
 }
 
 export type ActiveTab = 'PASSWORDS' | 'KEYS' | 'AUDIT' | 'USERS';
+

@@ -287,3 +287,4 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     </div>
   );
 };
+

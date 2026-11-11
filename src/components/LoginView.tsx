@@ -146,3 +146,4 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, showToast 
     </div>
   );
 };
+

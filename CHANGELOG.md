@@ -35,3 +35,4 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
   - Servidor Express empaquetado con Vite + Node.js en TypeScript.
   - Migración automática de tablas al iniciar (`ensureDatabaseSchema`) conectando a PostgreSQL mediante `DATABASE_URL`.
   - Configuración nativa con `railway.json`, `Procfile` y endpoint de salud `/api/health`.
+
