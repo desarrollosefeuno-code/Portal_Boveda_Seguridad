@@ -1,343 +1,219 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Navbar } from './components/Navbar.js';
-import { LoginView } from './components/LoginView.js';
-import { VaultUnlockModal } from './components/VaultUnlockModal.js';
-import { PasswordsView } from './components/PasswordsView.js';
-import { KeysView } from './components/KeysView.js';
-import { AuditLogView } from './components/AuditLogView.js';
-import { UsersManagementView } from './components/UsersManagementView.js';
-import { PasswordModal } from './components/PasswordModal.js';
-import { KeyModal } from './components/KeyModal.js';
-import { SecuritySettingsModal } from './components/SecuritySettingsModal.js';
-import { ToastContainer, type ToastMessage } from './components/Toast.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { F1LoadingScreen, useToast } from './components/f1-ui';
+import { AppHeader } from './components/AppHeader';
+import { LoginView } from './components/LoginView';
+import { VaultGate } from './components/VaultGate';
+import { AccountModal, ForcedPasswordChange } from './components/AccountPanels';
+import { PasswordsView } from './components/PasswordsView';
+import { KeysView } from './components/KeysView';
+import { AuditLogView } from './components/AuditLogView';
+import { UsersManagementView } from './components/UsersManagementView';
+import { MatrixRain, readRainPreference, saveRainPreference } from './components/MatrixRain';
+import { api, apiEvents } from './services/api';
+import type { ActiveTab, SessionUser, VaultStatus } from './types/vault';
 
-import type {
-  User,
-  ActiveTab,
-  VaultStatus,
-  VaultPasswordEntry,
-  VaultKeyEntry,
-} from './types/vault.js';
-import {
-  api,
-  getVaultSessionToken,
-  setVaultSessionToken,
-  onSessionExpired,
-  onVaultLocked,
-} from './services/api.js';
+/** Inactividad en el navegador: a los 15 min sin tocar nada se bloquea la bóveda (el servidor también lo hace). */
+const IDLE_MS = 15 * 60 * 1000;
+
+function useIdle(active: boolean, onIdle: () => void) {
+  const timer = useRef<number | undefined>(undefined);
+  const cb = useRef(onIdle);
+  cb.current = onIdle;
+  useEffect(() => {
+    if (!active) return;
+    const reset = () => {
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => cb.current(), IDLE_MS);
+    };
+    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
+    events.forEach((e) => window.addEventListener(e, reset, { passive: true }));
+    reset();
+    return () => {
+      window.clearTimeout(timer.current);
+      events.forEach((e) => window.removeEventListener(e, reset));
+    };
+  }, [active]);
+}
 
 export function App() {
-  // ── 1. Estado de Sesión del Usuario ──────────────────────────────────────
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const toast = useToast();
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [status, setStatus] = useState<VaultStatus | null>(null);
+  const [vaultExpiresAt, setVaultExpiresAt] = useState<string | null>(null);
+  const [tab, setTab] = useState<ActiveTab>('PASSWORDS');
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [rain, setRain] = useState(readRainPreference);
 
-  // ── 2. Estado de Bóveda y PIN ───────────────────────────────────────────
-  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
-  const [isVaultUnlocked, setIsVaultUnlocked] = useState(false);
+  const unlocked = Boolean(status?.unlocked);
 
-  // ── 3. Navegación ────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<ActiveTab>('PASSWORDS');
-
-  // ── 4. Datos de la Bóveda ───────────────────────────────────────────────
-  const [passwords, setPasswords] = useState<VaultPasswordEntry[]>([]);
-  const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
-  const [isLoadingData, setIsLoadingData] = useState(false);
-
-  // ── 5. Modales ──────────────────────────────────────────────────────────
-  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
-  const [editingPassword, setEditingPassword] = useState<VaultPasswordEntry | null>(null);
-
-  const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
-  const [editingKey, setEditingKey] = useState<VaultKeyEntry | null>(null);
-
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-
-  // ── 6. Toasts ────────────────────────────────────────────────────────────
-  const [toasts, setToasts] = useState<ToastMessage[]>([]);
-
-  const showToast = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info') => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, type, message }]);
-  };
-
-  const dismissToast = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  // ── Cargar Estado de Bóveda ─────────────────────────────────────────────
-  const loadVaultStatus = useCallback(async () => {
+  const refreshStatus = useCallback(async () => {
     try {
-      const status = await api.vault.getStatus();
-      setVaultStatus(status);
-      const hasToken = Boolean(getVaultSessionToken());
-      setIsVaultUnlocked(hasToken && status.unlocked);
-      if (!hasToken) {
-        setIsVaultUnlocked(false);
-      }
+      const s = await api.vault.status();
+      setStatus(s);
+      setVaultExpiresAt(s.expiresAt);
     } catch {
-      // Ignorar si no está autenticado aún
+      /* 401/403 se manejan en los eventos del API */
     }
   }, []);
 
-  // ── Cargar Datos Cifrados ────────────────────────────────────────────────
-  const loadVaultData = useCallback(async () => {
-    if (!isVaultUnlocked) return;
+  const refreshUser = useCallback(async () => {
     try {
-      setIsLoadingData(true);
-      const [passRes, keysRes] = await Promise.all([
-        api.passwords.list(),
-        api.keys.list(),
-      ]);
-      setPasswords(passRes.items);
-      setKeys(keysRes.items);
-    } catch (err: any) {
-      if (err?.code !== 'VAULT_LOCKED') {
-        showToast('Error al cargar datos de la bóveda.', 'error');
-      }
+      const { user: u } = await api.auth.me();
+      setUser(u);
+      return u;
+    } catch {
+      setUser(null);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshUser()
+      .then((u) => (u && !u.mustChangePassword ? refreshStatus() : undefined))
+      .finally(() => setChecking(false));
+  }, [refreshUser, refreshStatus]);
+
+  const userRef = useRef<SessionUser | null>(null);
+  userRef.current = user;
+
+  useEffect(() => {
+    apiEvents.sessionLost(() => {
+      // Solo avisa si había una sesión abierta (no al abrir la página sin sesión)
+      if (userRef.current) toast.info('Tu sesión terminó. Inicia sesión nuevamente.');
+      setUser(null);
+      setStatus(null);
+    });
+    apiEvents.vaultLocked(() => {
+      setStatus((s) => (s ? { ...s, unlocked: false, expiresAt: null } : s));
+      setVaultExpiresAt(null);
+      refreshStatus();
+    });
+    apiEvents.vaultActivity(setVaultExpiresAt);
+  }, [toast, refreshStatus]);
+
+  // Bloqueo automático cuando vence la caducidad del servidor aunque no haya peticiones
+  useEffect(() => {
+    if (!unlocked || !vaultExpiresAt) return;
+    const ms = new Date(vaultExpiresAt).getTime() - Date.now();
+    const t = window.setTimeout(() => {
+      setStatus((s) => (s ? { ...s, unlocked: false } : s));
+      toast.info('La bóveda se bloqueó por inactividad.');
+      refreshStatus();
+    }, Math.max(0, ms) + 500);
+    return () => window.clearTimeout(t);
+  }, [unlocked, vaultExpiresAt, toast, refreshStatus]);
+
+  const lock = useCallback(async () => {
+    try {
+      await api.vault.lock();
     } finally {
-      setIsLoadingData(false);
+      setStatus((s) => (s ? { ...s, unlocked: false, expiresAt: null } : s));
+      setVaultExpiresAt(null);
+      refreshStatus();
     }
-  }, [isVaultUnlocked]);
+  }, [refreshStatus]);
 
-  // ── Verificar Sesión al Montar ──────────────────────────────────────────
-  useEffect(() => {
-    api.auth
-      .me()
-      .then((res) => {
-        setCurrentUser(res.user);
-        loadVaultStatus();
-      })
-      .catch(() => {
-        setCurrentUser(null);
-      })
-      .finally(() => {
-        setIsCheckingAuth(false);
-      });
+  useIdle(unlocked, () => {
+    lock();
+    toast.info('La bóveda se bloqueó tras 15 minutos sin actividad.');
+  });
 
-    onSessionExpired(() => {
-      setCurrentUser(null);
-      setIsVaultUnlocked(false);
-      showToast('Tu sesión ha expirado. Por favor inicia sesión nuevamente.', 'warning');
-    });
-
-    onVaultLocked(() => {
-      setIsVaultUnlocked(false);
-      showToast('La bóveda se ha bloqueado por inactividad.', 'warning');
-    });
-  }, [loadVaultStatus]);
-
-  // Cargar datos cuando se desbloquea la bóveda
-  useEffect(() => {
-    if (isVaultUnlocked) {
-      loadVaultData();
-    }
-  }, [isVaultUnlocked, loadVaultData]);
-
-  // Bloqueo de Bóveda
-  const handleLockVault = () => {
-    setVaultSessionToken(null);
-    setIsVaultUnlocked(false);
-    setPasswords([]);
-    setKeys([]);
-    showToast('Bóveda bloqueada exitosamente.', 'info');
-    loadVaultStatus();
-  };
-
-  // Desbloqueo exitoso desde el Modal
-  const handleUnlocked = () => {
-    setIsVaultUnlocked(true);
-    loadVaultStatus();
-  };
-
-  // Cierre de Sesión General
-  const handleLogout = async () => {
+  const logout = async () => {
     try {
       await api.auth.logout();
-    } finally {
-      setCurrentUser(null);
-      setVaultSessionToken(null);
-      setIsVaultUnlocked(false);
-      showToast('Sesión cerrada.', 'info');
-    }
-  };
-
-  // ── Handlers de Contraseñas de Portales ──────────────────────────────────
-  const handleSavePassword = async (data: Partial<VaultPasswordEntry>) => {
-    if (editingPassword) {
-      await api.passwords.update(editingPassword.id, data);
-      showToast('Credencial de portal actualizada.', 'success');
-    } else {
-      await api.passwords.create(data);
-      showToast('Nueva credencial de portal creada y cifrada.', 'success');
-    }
-    await loadVaultData();
-  };
-
-  const handleDeletePassword = async (entry: VaultPasswordEntry) => {
-    if (!confirm(`¿Estás seguro de eliminar la credencial "${entry.title}"?`)) return;
-    try {
-      await api.passwords.delete(entry.id);
-      showToast(`Credencial "${entry.title}" eliminada.`, 'success');
-      await loadVaultData();
     } catch {
-      showToast('Error al eliminar credencial.', 'error');
+      /* aunque falle, se limpia la pantalla */
     }
+    setUser(null);
+    setStatus(null);
+    setAccountOpen(false);
   };
 
-  // ── Handlers de Llaves y Tokens ──────────────────────────────────────────
-  const handleSaveKey = async (data: Partial<VaultKeyEntry>) => {
-    if (editingKey) {
-      await api.keys.update(editingKey.id, data);
-      showToast('Llave / Token actualizado correctamente.', 'success');
-    } else {
-      await api.keys.create(data);
-      showToast('Nueva llave / token registrado y cifrado.', 'success');
-    }
-    await loadVaultData();
+  const changeRain = (on: boolean) => {
+    setRain(on);
+    saveRainPreference(on);
   };
 
-  const handleDeleteKey = async (entry: VaultKeyEntry) => {
-    if (!confirm(`¿Estás seguro de eliminar la llave "${entry.title}"?`)) return;
-    try {
-      await api.keys.delete(entry.id);
-      showToast(`Llave "${entry.title}" eliminada.`, 'success');
-      await loadVaultData();
-    } catch {
-      showToast('Error al eliminar llave.', 'error');
-    }
-  };
+  if (checking) return <F1LoadingScreen text="Iniciando la bóveda…" subtext="Verificando la sesión segura" />;
 
-  if (isCheckingAuth) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400 text-xs font-mono">
-        Iniciando entorno de alta seguridad...
-      </div>
-    );
-  }
-
-  // Si no ha iniciado sesión de usuario
-  if (!currentUser) {
+  if (!user) {
     return (
       <>
+        <MatrixRain enabled={rain} intensity="high" />
+        <div className="matrix-scanlines" aria-hidden="true" />
         <LoginView
-          onLoginSuccess={(user) => {
-            setCurrentUser(user);
-            loadVaultStatus();
+          onLogin={(u) => {
+            setUser(u);
+            setTab('PASSWORDS');
+            if (!u.mustChangePassword) refreshStatus();
           }}
-          showToast={showToast}
         />
-        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </>
     );
   }
 
-  // Usuario autenticado en el portal
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
-      <Navbar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        currentUser={currentUser}
-        vaultStatus={vaultStatus}
-        isVaultUnlocked={isVaultUnlocked}
-        onLockVault={handleLockVault}
-        onOpenSettings={() => setIsSettingsModalOpen(true)}
-        onLogout={handleLogout}
+    <div className="relative min-h-dvh">
+      <MatrixRain enabled={rain} intensity={unlocked ? 'low' : 'high'} />
+      <div className="matrix-scanlines" aria-hidden="true" />
+      <div className="relative z-10 flex min-h-dvh flex-col">
+        <AppHeader
+          user={user}
+          tab={tab}
+          onTab={setTab}
+          unlocked={unlocked}
+          vaultExpiresAt={vaultExpiresAt}
+          onLock={lock}
+          onAccount={() => setAccountOpen(true)}
+          onLogout={logout}
+        />
+
+        <main id="contenido" className="mx-auto w-full max-w-7xl flex-1 px-4 pb-24 pt-6 sm:px-6 md:pb-10">
+          {user.mustChangePassword ? (
+            <ForcedPasswordChange
+              user={user}
+              onLogout={logout}
+              onDone={async () => {
+                const u = await refreshUser();
+                if (u) refreshStatus();
+              }}
+            />
+          ) : !unlocked ? (
+            <VaultGate
+              status={status}
+              onRefresh={refreshStatus}
+              onUnlocked={async () => {
+                await refreshStatus();
+                refreshUser();
+                toast.success('Bóveda desbloqueada.');
+              }}
+            />
+          ) : (
+            <>
+              {tab === 'PASSWORDS' && <PasswordsView isAdmin={user.role === 'admin'} />}
+              {tab === 'KEYS' && <KeysView user={user} />}
+              {tab === 'AUDIT' && <AuditLogView />}
+              {tab === 'USERS' && user.role === 'admin' && <UsersManagementView currentUserId={user.id} />}
+            </>
+          )}
+        </main>
+
+        <footer className="hidden border-t border-line bg-header/80 py-3 text-center text-[11px] text-fg-3 md:block">
+          F1 KeyVault v2.0.0 · AES-256-GCM · cada revelación de un secreto queda en la bitácora
+        </footer>
+      </div>
+
+      <AccountModal
+        key={user.id + user.name}
+        open={accountOpen}
+        onClose={() => setAccountOpen(false)}
+        user={user}
+        onUserChanged={refreshUser}
+        vaultUnlocked={unlocked}
+        rain={rain}
+        onRainChange={changeRain}
       />
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {!isVaultUnlocked ? (
-          <VaultUnlockModal
-            vaultStatus={vaultStatus}
-            onUnlocked={handleUnlocked}
-            onRefreshStatus={loadVaultStatus}
-            showToast={showToast}
-            isAdmin={currentUser.role === 'admin'}
-          />
-        ) : (
-          <>
-            {activeTab === 'PASSWORDS' && (
-              <PasswordsView
-                entries={passwords}
-                onRefresh={loadVaultData}
-                onOpenCreate={() => {
-                  setEditingPassword(null);
-                  setIsPasswordModalOpen(true);
-                }}
-                onOpenEdit={(p) => {
-                  setEditingPassword(p);
-                  setIsPasswordModalOpen(true);
-                }}
-                onDelete={handleDeletePassword}
-                showToast={showToast}
-                userEmail={currentUser.email}
-              />
-            )}
-
-            {activeTab === 'KEYS' && (
-              <KeysView
-                entries={keys}
-                onRefresh={loadVaultData}
-                onOpenCreate={() => {
-                  setEditingKey(null);
-                  setIsKeyModalOpen(true);
-                }}
-                onOpenEdit={(k) => {
-                  setEditingKey(k);
-                  setIsKeyModalOpen(true);
-                }}
-                onDelete={handleDeleteKey}
-                showToast={showToast}
-                userEmail={currentUser.email}
-              />
-            )}
-
-            {activeTab === 'AUDIT' && <AuditLogView showToast={showToast} />}
-
-            {activeTab === 'USERS' && currentUser.role === 'admin' && (
-              <UsersManagementView currentUserId={currentUser.id} showToast={showToast} />
-            )}
-          </>
-        )}
-      </main>
-
-      {/* Footer de Seguridad */}
-      <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-600">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>F1 KeyVault & Fortress • Portal de Bóveda Ultra-Segura v1.0.0</span>
-          <span>Cifrado Militar AES-256-GCM • Despliegue en Railway</span>
-        </div>
-      </footer>
-
-      {/* Modales */}
-      <PasswordModal
-        isOpen={isPasswordModalOpen}
-        onClose={() => setIsPasswordModalOpen(false)}
-        onSave={handleSavePassword}
-        editingEntry={editingPassword}
-        categories={Array.from(new Set(passwords.map((p) => p.category)))}
-      />
-
-      <KeyModal
-        isOpen={isKeyModalOpen}
-        onClose={() => setIsKeyModalOpen(false)}
-        onSave={handleSaveKey}
-        editingEntry={editingKey}
-      />
-
-      <SecuritySettingsModal
-        isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)}
-        vaultStatus={vaultStatus}
-        onPinChanged={loadVaultStatus}
-        showToast={showToast}
-        isAdmin={currentUser.role === 'admin'}
-      />
-
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
-
-export default App;
-

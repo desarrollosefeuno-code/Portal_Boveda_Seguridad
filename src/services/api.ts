@@ -1,188 +1,130 @@
 import type {
-  VaultPasswordEntry,
-  VaultKeyEntry,
-  VaultStatus,
+  AdminRequest,
   AuditLogEntry,
-  User,
-} from '../types/vault.js';
+  Environment,
+  KeyInput,
+  KeyMeta,
+  KeySecret,
+  ManagedUser,
+  PasswordInput,
+  PasswordMeta,
+  PasswordSecret,
+  RevealPurpose,
+  SecretVersion,
+  SessionUser,
+  VaultStatus,
+} from '../types/vault';
 
-let inMemoryVaultToken: string | null = null;
-let sessionExpiredHandler: (() => void) | null = null;
-let vaultLockedHandler: (() => void) | null = null;
+/**
+ * Cliente del API. Las credenciales viajan solo en cookies HttpOnly: este código no guarda ni lee tokens
+ * (antes el token de bóveda quedaba en sessionStorage, A-02). Toda petición que cambia datos lleva la
+ * cabecera propia que el servidor exige como defensa CSRF.
+ */
 
-export function setVaultSessionToken(token: string | null) {
-  inMemoryVaultToken = token;
-  if (token) {
-    sessionStorage.setItem('f1_vault_session_token', token);
-  } else {
-    sessionStorage.removeItem('f1_vault_session_token');
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public code?: string, public data?: Record<string, any>) {
+    super(message);
   }
 }
 
-export function getVaultSessionToken(): string | null {
-  if (!inMemoryVaultToken) {
-    inMemoryVaultToken = sessionStorage.getItem('f1_vault_session_token');
-  }
-  return inMemoryVaultToken;
-}
+type Listener = (code: string) => void;
+let onSessionLost: Listener | null = null;
+let onVaultLocked: Listener | null = null;
+let onVaultActivity: ((expiresAt: string) => void) | null = null;
 
-export function onSessionExpired(cb: () => void) {
-  sessionExpiredHandler = cb;
-}
-
-export function onVaultLocked(cb: () => void) {
-  vaultLockedHandler = cb;
-}
+export const apiEvents = {
+  sessionLost: (cb: Listener) => (onSessionLost = cb),
+  vaultLocked: (cb: Listener) => (onVaultLocked = cb),
+  vaultActivity: (cb: (expiresAt: string) => void) => (onVaultActivity = cb),
+};
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers || {});
-  headers.set('Content-Type', 'application/json');
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers);
+  if (options.body) headers.set('Content-Type', 'application/json');
+  if (method !== 'GET') headers.set('X-F1-Vault', '1');
 
-  const vaultToken = getVaultSessionToken();
-  if (vaultToken) {
-    headers.set('x-vault-token', vaultToken);
+  let res: Response;
+  try {
+    res = await fetch(`/api${endpoint}`, { ...options, method, headers, credentials: 'same-origin', cache: 'no-store' });
+  } catch {
+    throw new ApiError('No hay conexión con el servidor.', 0, 'NETWORK');
   }
 
-  const res = await fetch(`/api${endpoint}`, {
-    ...options,
-    headers,
-    credentials: 'include', // Para cookies HttpOnly
-  });
+  const expires = res.headers.get('X-Vault-Expires-At');
+  if (expires) onVaultActivity?.(expires);
 
-  const isJson = res.headers.get('content-type')?.includes('application/json');
-  const data = isJson ? await res.json() : null;
-
+  const data = res.headers.get('content-type')?.includes('application/json') ? await res.json() : null;
   if (!res.ok) {
-    // Si la sesión del portal expiró (401), notificar a la app
-    if (res.status === 401 && !endpoint.startsWith('/auth/login')) {
-      if (sessionExpiredHandler) sessionExpiredHandler();
-    }
-
-    // Si la bóveda está bloqueada o el token de bóveda expiró (403), bloquear bóveda sin cerrar sesión del usuario
-    if (res.status === 403 && data?.error?.includes('VAULT_')) {
-      setVaultSessionToken(null);
-      if (vaultLockedHandler) vaultLockedHandler();
-    }
-
-    const errorMsg = data?.message || data?.error || `Error HTTP ${res.status}`;
-    const err = new Error(errorMsg) as any;
-    err.status = res.status;
-    err.code = data?.error;
-    throw err;
+    const code: string | undefined = data?.error;
+    if (res.status === 401 && !endpoint.startsWith('/auth/login')) onSessionLost?.(code || 'UNAUTHORIZED');
+    if (res.status === 403 && code?.startsWith('VAULT_')) onVaultLocked?.(code);
+    throw new ApiError(data?.message || `Error HTTP ${res.status}`, res.status, code, data ?? undefined);
   }
-
   return data as T;
 }
 
+const json = (method: string, body?: unknown): RequestInit => ({ method, body: body === undefined ? undefined : JSON.stringify(body) });
+const id = (value: string) => encodeURIComponent(value);
+type Ok = { success: boolean; message?: string };
+
+function items<Meta, Secret, Input>(base: string) {
+  return {
+    list: () => request<{ items: Meta[] }>(base),
+    trash: () => request<{ items: Meta[] }>(`${base}/trash`),
+    reveal: (itemId: string, purpose: RevealPurpose) => request<Secret>(`${base}/${id(itemId)}/reveal?purpose=${purpose}`),
+    create: (data: Input) => request<Ok & { id: string }>(base, json('POST', data)),
+    update: (itemId: string, data: Input) => request<Ok & { version: number }>(`${base}/${id(itemId)}`, json('PUT', data)),
+    favorite: (itemId: string, isFavorite: boolean) => request<Ok>(`${base}/${id(itemId)}/favorite`, json('PUT', { isFavorite })),
+    remove: (itemId: string) => request<Ok>(`${base}/${id(itemId)}`, json('DELETE')),
+    restore: (itemId: string) => request<Ok>(`${base}/${id(itemId)}/restore`, json('POST', {})),
+    purge: (itemId: string) => request<Ok>(`${base}/${id(itemId)}/purge`, json('DELETE')),
+    versions: (itemId: string) => request<{ items: SecretVersion[] }>(`${base}/${id(itemId)}/versions`),
+    revealVersion: (versionId: string) => request<{ value: string }>(`${base}/versions/${id(versionId)}/reveal`),
+  };
+}
+
+export type ItemsApi<Meta, Secret, Input> = ReturnType<typeof items<Meta, Secret, Input>>;
+
 export const api = {
   auth: {
-    login: (credentials: { email: string; password: string }) =>
-      request<{ success: boolean; user: User; token: string }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify(credentials),
-      }),
-    logout: () => {
-      setVaultSessionToken(null);
-      return request<{ success: boolean }>('/auth/logout', { method: 'POST' });
-    },
-    me: () => request<{ user: User }>('/auth/me'),
-    updateProfile: (data: { name?: string; currentPassword?: string; newPassword?: string }) =>
-      request<{ success: boolean; message: string }>('/auth/profile', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
+    login: (email: string, password: string) => request<{ user: SessionUser }>('/auth/login', json('POST', { email, password })),
+    logout: () => request<Ok>('/auth/logout', json('POST', {})),
+    me: () => request<{ user: SessionUser }>('/auth/me'),
+    updateProfile: (name: string) => request<Ok>('/auth/profile', json('PUT', { name })),
+    changePassword: (currentPassword: string, newPassword: string) => request<Ok>('/auth/change-password', json('POST', { currentPassword, newPassword })),
   },
-
   vault: {
-    getStatus: () => request<VaultStatus>('/vault/status'),
-    unlock: (pin: string) =>
-      request<{ success: boolean; vaultToken: string; expiresInSeconds: number }>('/vault/unlock', {
-        method: 'POST',
-        body: JSON.stringify({ pin }),
-      }),
-    changePin: (data: { currentPin?: string; newPin: string }) =>
-      request<{ success: boolean; message: string }>('/vault/change-pin', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
+    status: () => request<VaultStatus>('/vault/status'),
+    setupPin: (password: string, newPin: string) => request<Ok & { expiresAt: string }>('/vault/pin/setup', json('POST', { password, newPin })),
+    unlock: (pin: string) => request<Ok & { expiresAt: string }>('/vault/unlock', json('POST', { pin })),
+    lock: () => request<Ok>('/vault/lock', json('POST', {})),
+    changePin: (currentPin: string, newPin: string) => request<Ok & { expiresAt: string }>('/vault/change-pin', json('POST', { currentPin, newPin })),
   },
-
-  passwords: {
-    list: () => request<{ items: VaultPasswordEntry[] }>('/vault/passwords'),
-    create: (data: Partial<VaultPasswordEntry>) =>
-      request<{ success: boolean; id: string; message: string }>('/vault/passwords', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    update: (id: string, data: Partial<VaultPasswordEntry>) =>
-      request<{ success: boolean; message: string }>(`/vault/passwords/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    delete: (id: string) =>
-      request<{ success: boolean; message: string }>(`/vault/passwords/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      }),
-    logAction: (id: string, action: 'VIEW' | 'COPY', fieldName?: string) =>
-      request<{ ok: boolean }>(`/vault/passwords/${encodeURIComponent(id)}/log-action`, {
-        method: 'POST',
-        body: JSON.stringify({ action, fieldName }),
-      }),
-  },
-
-  keys: {
-    list: () => request<{ items: VaultKeyEntry[] }>('/vault/keys'),
-    create: (data: Partial<VaultKeyEntry>) =>
-      request<{ success: boolean; id: string; message: string }>('/vault/keys', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    update: (id: string, data: Partial<VaultKeyEntry>) =>
-      request<{ success: boolean; message: string }>(`/vault/keys/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    delete: (id: string) =>
-      request<{ success: boolean; message: string }>(`/vault/keys/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      }),
-    logAction: (id: string, action: 'VIEW' | 'COPY', fieldName?: string) =>
-      request<{ ok: boolean }>(`/vault/keys/${encodeURIComponent(id)}/log-action`, {
-        method: 'POST',
-        body: JSON.stringify({ action, fieldName }),
-      }),
-  },
-
+  passwords: items<PasswordMeta, PasswordSecret, PasswordInput>('/vault/passwords'),
+  keys: items<KeyMeta, KeySecret, KeyInput>('/vault/keys'),
   audit: {
-    getLogs: (params: { page?: number; limit?: number; eventType?: string; targetType?: string; search?: string }) => {
+    list: (params: { page?: number; limit?: number; eventType?: string; targetType?: string; search?: string }) => {
       const q = new URLSearchParams();
-      if (params.page) q.set('page', String(params.page));
-      if (params.limit) q.set('limit', String(params.limit));
-      if (params.eventType) q.set('eventType', params.eventType);
-      if (params.targetType) q.set('targetType', params.targetType);
-      if (params.search) q.set('search', params.search);
-      return request<{ items: AuditLogEntry[]; pagination: { page: number; limit: number; totalCount: number; totalPages: number } }>(
+      for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v));
+      return request<{ items: AuditLogEntry[]; pagination: { page: number; limit: number; totalCount: number; totalPages: number }; scope: 'all' | 'own' }>(
         `/vault/audit?${q.toString()}`
       );
     },
   },
-
   users: {
-    list: () => request<{ users: User[] }>('/users'),
-    create: (data: { email: string; name: string; password: string; role: 'admin' | 'operator' }) =>
-      request<{ success: boolean; message: string }>('/users', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    update: (id: string, data: { name: string; role: 'admin' | 'operator'; status: 'active' | 'disabled'; newPassword?: string }) =>
-      request<{ success: boolean; message: string }>(`/users/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    delete: (id: string) =>
-      request<{ success: boolean; message: string }>(`/users/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      }),
+    list: () => request<{ users: ManagedUser[] }>('/users'),
+    create: (data: { email: string; name: string; temporaryPassword: string; keyEnvironments: Environment[] }) => request<Ok>('/users', json('POST', data)),
+    update: (userId: string, data: { name: string; status: 'active' | 'disabled'; keyEnvironments: Environment[] }) => request<Ok>(`/users/${id(userId)}`, json('PUT', data)),
+    resetPassword: (userId: string, temporaryPassword: string) => request<Ok>(`/users/${id(userId)}/reset-password`, json('POST', { temporaryPassword })),
+    resetPin: (userId: string) => request<Ok>(`/users/${id(userId)}/reset-pin`, json('POST', {})),
+    demote: (userId: string) => request<Ok>(`/users/${id(userId)}/demote`, json('POST', {})),
+    remove: (userId: string) => request<Ok>(`/users/${id(userId)}`, json('DELETE')),
+    requestAdmin: (userId: string) => request<Ok & { status: 'pending' | 'granted' }>(`/users/${id(userId)}/admin-request`, json('POST', {})),
+    adminRequests: () => request<{ items: AdminRequest[] }>('/users/admin-requests'),
+    approve: (requestId: string) => request<Ok>(`/users/admin-requests/${id(requestId)}/approve`, json('POST', {})),
+    reject: (requestId: string) => request<Ok>(`/users/admin-requests/${id(requestId)}/reject`, json('POST', {})),
   },
 };
 
+export const errorMessage = (err: unknown, fallback = 'Ocurrió un error.') => (err instanceof Error && err.message ? err.message : fallback);

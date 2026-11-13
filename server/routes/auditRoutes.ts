@@ -2,79 +2,53 @@ import { Router } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireVaultUnlocked } from '../middleware/vaultAuth.js';
+import { auditQuery, handler, parse } from '../validation.js';
 
+/** Bitácora: el admin ve todo; el operador solo sus propios eventos (IPs y equipos de otros quedan reservados). */
 const router = Router();
+router.use(requireAuth, requireVaultUnlocked);
 
-router.use(requireAuth);
-router.use(requireVaultUnlocked);
-
-// GET /api/vault/audit
-router.get('/', async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(100, Math.max(10, parseInt(req.query.limit as string) || 50));
-  const offset = (page - 1) * limit;
-
-  const eventType = req.query.eventType as string | undefined;
-  const targetType = req.query.targetType as string | undefined;
-  const search = req.query.search as string | undefined;
-
-  try {
+router.get(
+  '/',
+  handler(async (req, res) => {
+    const { page, limit, eventType, targetType, search } = parse(auditQuery, req.query);
+    const user = req.user!;
     const conditions: string[] = [];
-    const values: any[] = [];
-    let pIdx = 1;
+    const values: unknown[] = [];
+    /** Agrega un valor y devuelve su marcador ($n). */
+    const param = (value: unknown) => {
+      values.push(value);
+      return `$${values.length}`;
+    };
 
-    if (eventType && eventType !== 'ALL') {
-      conditions.push(`event_type = $${pIdx++}`);
-      values.push(eventType);
+    if (user.role !== 'admin') {
+      conditions.push(`(user_id = ${param(user.id)} OR (user_id IS NULL AND user_email = ${param(user.email)}))`);
+    }
+    if (eventType && eventType !== 'ALL') conditions.push(`event_type = ${param(eventType)}`);
+    if (targetType && targetType !== 'ALL') conditions.push(`target_type = ${param(targetType)}`);
+    if (search) {
+      const term = param(`%${search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      conditions.push(`(target_title ILIKE ${term} OR user_email ILIKE ${term} OR user_name ILIKE ${term})`);
     }
 
-    if (targetType && targetType !== 'ALL') {
-      conditions.push(`target_type = $${pIdx++}`);
-      values.push(targetType);
-    }
-
-    if (search && search.trim()) {
-      conditions.push(`(target_title ILIKE $${pIdx} OR user_email ILIKE $${pIdx} OR user_name ILIKE $${pIdx})`);
-      values.push(`%${search.trim()}%`);
-      pIdx++;
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    const countRows = await query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM vault_audit_logs ${whereClause};`,
-      values
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (page - 1) * limit;
+    // Una sola consulta: total con función de ventana en vez de un COUNT aparte (M-07)
+    const rows = await query<Record<string, unknown> & { total: string }>(
+      `SELECT id, event_type, target_type, target_id, target_title, user_email, user_name, ip_address, user_agent, details, created_at,
+              COUNT(*) OVER()::text AS total
+       FROM vault_audit_logs ${where}
+       ORDER BY created_at DESC
+       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, limit, offset]
     );
-    const totalCount = parseInt(countRows[0]?.count || '0', 10);
-
-    const logsSql = `
-      SELECT 
-        id, event_type, target_type, target_id, target_title,
-        user_email, user_name, ip_address, user_agent, details,
-        created_at
-      FROM vault_audit_logs
-      ${whereClause}
-      ORDER BY created_at DESC
-      LIMIT $${pIdx++} OFFSET $${pIdx++};
-    `;
-    values.push(limit, offset);
-
-    const items = await query<any>(logsSql, values);
-
-    res.status(200).json({
-      items,
-      pagination: {
-        page,
-        limit,
-        totalCount,
-        totalPages: Math.ceil(totalCount / limit),
-      },
+    const totalCount = rows[0] ? Number.parseInt(rows[0].total, 10) : 0;
+    res.json({
+      items: rows.map(({ total: _t, ...item }) => item),
+      pagination: { page, limit, totalCount, totalPages: Math.max(1, Math.ceil(totalCount / limit)) },
+      scope: user.role === 'admin' ? 'all' : 'own',
     });
-  } catch (err: any) {
-    console.error('Error al consultar bitácora de auditoría:', err);
-    res.status(500).json({ error: 'Error al consultar bitácora de auditoría.' });
-  }
-});
+  })
+);
 
 export default router;
-

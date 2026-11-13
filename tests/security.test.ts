@@ -1,81 +1,84 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
-  encryptValue,
+  aad,
+  createVaultToken,
   decryptValue,
+  encryptValue,
   hashPassword,
-  verifyPassword,
   hashPin,
+  initCrypto,
+  needsReencryption,
+  pinWeakness,
+  verifyPassword,
   verifyPin,
-  generateSalt,
-  createVaultSessionToken,
-  verifyVaultSessionToken,
+  verifyVaultToken,
 } from '../server/services/cryptoService.js';
+import { TEST_SECRETS } from './helpers.js';
 
-test('Cifrado y Descifrado AES-256-GCM', () => {
-  const originalSecret = 'SuperSecretToken_12345!@#$%^&*()';
-  const encrypted = encryptValue(originalSecret);
+initCrypto(TEST_SECRETS);
 
-  assert.ok(encrypted.startsWith('v1:'), 'El payload debe tener el prefijo de versión v1');
-  assert.notEqual(encrypted, originalSecret, 'El texto cifrado no debe coincidir con el texto plano');
-
-  const decrypted = decryptValue(encrypted);
-  assert.equal(decrypted, originalSecret, 'El texto descifrado debe coincidir exactamente con el original');
+test('AES-256-GCM v2: cifra, descifra y ata el valor a su registro', () => {
+  const ctx = aad('vault_keys', '1', 'encrypted_secret');
+  const enc = encryptValue('SuperSecretToken_12345!', ctx);
+  assert.ok(enc.startsWith('v2:'));
+  assert.equal(decryptValue(enc, ctx), 'SuperSecretToken_12345!');
+  assert.throws(() => decryptValue(enc, aad('vault_keys', '2', 'encrypted_secret')));
 });
 
-test('Detección y rechazo de manipulación (AuthTag / Ciphertext tampering)', () => {
-  const secret = 'ClaveBancariaUltraSegura2026';
-  const encrypted = encryptValue(secret);
-  const parts = encrypted.split(':');
-
-  // Adulterar el ciphertext (última parte)
-  const tamperedCiphertext = parts[4].slice(0, -2) + (parts[4].endsWith('0') ? '1' : '0');
-  parts[4] = tamperedCiphertext;
-  const tamperedPayload = parts.join(':');
-
-  assert.throws(
-    () => decryptValue(tamperedPayload),
-    /unsupported state or unable to authenticate data/i,
-    'Debe rechazar inmediatamente cualquier carga adulterada'
-  );
+test('rechaza un cifrado manipulado', () => {
+  const ctx = aad('t', '1', 'f');
+  const parts = encryptValue('ClaveUltraSegura', ctx).split(':');
+  parts[4] = parts[4].slice(0, -2) + (parts[4].endsWith('A') ? 'B' : 'A');
+  assert.throws(() => decryptValue(parts.join(':'), ctx));
 });
 
-test('Hash y Verificación de Contraseñas con scrypt', async () => {
-  const password = 'PasswordPruebaF1_2026!';
-  const hash = await hashPassword(password);
-
-  assert.ok(hash.includes(':'), 'El hash debe contener la sal y el digest separado por dos puntos');
-
-  const isValid = await verifyPassword(password, hash);
-  assert.equal(isValid, true, 'La contraseña correcta debe ser validada exitosamente');
-
-  const isInvalid = await verifyPassword('PasswordErronea', hash);
-  assert.equal(isInvalid, false, 'Una contraseña incorrecta debe ser rechazada');
+test('lee el formato heredado v1 y lo marca para re-cifrar', () => {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(TEST_SECRETS.masterKey, salt, 32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const data = Buffer.concat([cipher.update('valor-antiguo', 'utf8'), cipher.final()]);
+  const v1 = ['v1', salt.toString('hex'), iv.toString('hex'), cipher.getAuthTag().toString('hex'), data.toString('hex')].join(':');
+  assert.equal(decryptValue(v1, 'cualquiera'), 'valor-antiguo');
+  assert.equal(needsReencryption(v1), true);
+  assert.equal(needsReencryption(encryptValue('x', 'c')), false);
 });
 
-test('Hash y Verificación de PIN Maestro de 4 dígitos', async () => {
-  const pin = '4829';
-  const salt = generateSalt();
-  const hash = await hashPin(pin, salt);
-
-  const isValid = await verifyPin(pin, salt, hash);
-  assert.equal(isValid, true, 'El PIN correcto debe ser validado exitosamente');
-
-  const isWrong = await verifyPin('1111', salt, hash);
-  assert.equal(isWrong, false, 'Un PIN incorrecto debe ser rechazado');
+test('rota la clave maestra: lo cifrado con la anterior se sigue leyendo', () => {
+  const ctx = aad('t', '9', 'f');
+  const enc = encryptValue('antes-de-rotar', ctx);
+  initCrypto({ masterKey: 'otra-clave-maestra-nueva-0123456789abcdef', previousMasterKey: TEST_SECRETS.masterKey, jwtSecret: TEST_SECRETS.jwtSecret });
+  assert.equal(decryptValue(enc, ctx), 'antes-de-rotar');
+  assert.equal(needsReencryption(enc), true);
+  initCrypto(TEST_SECRETS);
 });
 
-test('Generación y Verificación de Token Efímero de Bóveda', () => {
-  const token = createVaultSessionToken('usr-123', 'admin@f1.services', 900);
-  assert.ok(token.includes('.'), 'El token debe tener payload y firma');
+test('contraseñas: hash scrypt nuevo y compatibilidad con el formato heredado', async () => {
+  const hash = await hashPassword('PasswordPruebaF1_2026!');
+  assert.ok(hash.startsWith('scrypt$'));
+  assert.equal(await verifyPassword('PasswordPruebaF1_2026!', hash), true);
+  assert.equal(await verifyPassword('otra', hash), false);
 
-  const verification = verifyVaultSessionToken(token);
-  assert.equal(verification.valid, true, 'El token generado debe ser válido');
-  assert.equal(verification.email, 'admin@f1.services');
-  assert.equal(verification.userId, 'usr-123');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const legacy = `${salt}:${crypto.scryptSync('heredada', salt, 64).toString('hex')}`;
+  assert.equal(await verifyPassword('heredada', legacy), true);
+});
 
-  // Token adulterado
-  const tamperedToken = token.slice(0, -2) + 'aa';
-  const tamperedVerification = verifyVaultSessionToken(tamperedToken);
-  assert.equal(tamperedVerification.valid, false, 'El token adulterado debe ser rechazado');
+test('PIN personal: hash con pimienta y política de 6 dígitos', async () => {
+  const hash = await hashPin('482915');
+  assert.equal(await verifyPin('482915', hash), true);
+  assert.equal(await verifyPin('482916', hash), false);
+  for (const weak of ['111111', '123456', '987654', '121212', '123123', '1234']) assert.ok(pinWeakness(weak), weak);
+  assert.equal(pinWeakness('482915'), null);
+});
+
+test('token de bóveda: firmado, con caducidad y rechazo de manipulación', () => {
+  const { token, payload } = createVaultToken({ uid: 'u1', sv: 1, ve: 1 });
+  assert.equal(verifyVaultToken(token)?.uid, 'u1');
+  assert.ok(payload.exp <= payload.abs);
+  assert.equal(verifyVaultToken(token.slice(0, -2) + 'aa'), null);
+  const expired = createVaultToken({ uid: 'u1', sv: 1, ve: 1, abs: Date.now() - 1000 });
+  assert.equal(verifyVaultToken(expired.token), null);
 });

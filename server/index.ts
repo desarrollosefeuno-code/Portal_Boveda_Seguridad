@@ -1,114 +1,54 @@
-import express from 'express';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
+import 'dotenv/config';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import dotenv from 'dotenv';
+import { ConfigError, loadConfig } from './config.js';
+import { createPgDatabase, setDatabase, waitForDatabase } from './db/connection.js';
+import { runMigrations } from './db/migrations.js';
+import { bootstrapUsers, reencryptLegacyData } from './db/bootstrap.js';
+import { initCrypto } from './services/cryptoService.js';
+import { createApp } from './app.js';
 
-import { testConnection } from './db/connection.js';
-import { ensureDatabaseSchema } from './db/schema.js';
-import authRoutes from './routes/authRoutes.js';
-import vaultAuthRoutes from './routes/vaultAuthRoutes.js';
-import passwordRoutes from './routes/passwordRoutes.js';
-import keyRoutes from './routes/keyRoutes.js';
-import auditRoutes from './routes/auditRoutes.js';
-import userRoutes from './routes/userRoutes.js';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-dotenv.config();
+async function main() {
+  console.log('[arranque] Iniciando F1 KeyVault & Fortress…');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+  // 1. Configuración: sin secretos válidos el servidor no arranca (C-03).
+  const config = loadConfig();
+  initCrypto(config);
 
-const app = express();
-const PORT = parseInt(process.env.PORT || '3001', 10);
+  // 2. Base de datos: esperar, migrar y preparar usuarios. Si algo falla, se detiene (M-03).
+  const database = createPgDatabase({ connectionString: config.databaseUrl, ssl: config.databaseSsl });
+  setDatabase(database);
+  await waitForDatabase(database);
+  await runMigrations(database);
+  await bootstrapUsers(database, config);
 
-// Cabeceras de seguridad estrictas (OWASP Best Practices)
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  if (process.env.NODE_ENV === 'production') {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  }
-  next();
-});
-
-app.use(cors({
-  origin: true,
-  credentials: true,
-}));
-
-app.use(express.json({ limit: '2mb' }));
-app.use(cookieParser());
-
-// Endpoint de Salud / Healthcheck (útil para Railway y monitoreo)
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    service: 'f1-keyvault-fortress',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// Rutas API
-app.use('/api/auth', authRoutes);
-app.use('/api/vault', vaultAuthRoutes);
-app.use('/api/vault/passwords', passwordRoutes);
-app.use('/api/vault/keys', keyRoutes);
-app.use('/api/vault/audit', auditRoutes);
-app.use('/api/users', userRoutes);
-
-// Servir cliente en producción
-const clientDistPath = path.resolve(__dirname, '../../dist/client');
-const clientAltDistPath = path.resolve(__dirname, '../client');
-
-import fs from 'node:fs';
-const staticPath = fs.existsSync(clientDistPath) ? clientDistPath : (fs.existsSync(clientAltDistPath) ? clientAltDistPath : null);
-
-if (staticPath) {
-  app.use(express.static(staticPath));
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api/')) {
-      res.sendFile(path.join(staticPath, 'index.html'));
-    } else {
-      res.status(404).json({ error: 'Endpoint no encontrado.' });
-    }
-  });
-}
-
-// Iniciar servidor
-async function startServer() {
-  console.log('🚀 Iniciando F1 KeyVault & Fortress...');
-  const dbConnected = await testConnection();
-
-  if (dbConnected) {
-    try {
-      await ensureDatabaseSchema();
-    } catch (err) {
-      console.error('Error inicializando esquema de BD:', err);
-    }
-  } else {
-    console.warn('⚠️ Se iniciará el servidor Express, pero la conexión a PostgreSQL no está lista todavía.');
-  }
-
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🔒 F1 KeyVault & Fortress escuchando en el puerto ${PORT}`);
-    console.log(`🌐 Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  // 3. Servidor
+  // dist/server/index.js → dist/client; en desarrollo (tsx server/index.ts) → dist/client del proyecto
+  const staticDir = [path.resolve(__dirname, '../client'), path.resolve(__dirname, '../dist/client')].find((p) => fs.existsSync(p)) ?? null;
+  const app = createApp(config, { staticDir });
+  const server = app.listen(config.port, '0.0.0.0', () => {
+    console.log(`[arranque] Escuchando en el puerto ${config.port} (${config.isProduction ? 'producción' : 'desarrollo'}).`);
   });
 
-  const shutdown = () => {
-    console.log('Cerrando servidor de forma segura...');
+  // 4. Re-cifrado de datos heredados en segundo plano
+  reencryptLegacyData(database).catch((err) => console.error('[cifrado] Falló el re-cifrado en segundo plano:', err));
+
+  const shutdown = (signal: string) => {
+    console.log(`[cierre] ${signal} recibido. Cerrando…`);
     server.close(() => {
-      console.log('Servidor cerrado.');
-      process.exit(0);
+      database.close().finally(() => process.exit(0));
     });
+    setTimeout(() => process.exit(1), 10_000).unref();
   };
-
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
-
+main().catch((err) => {
+  if (err instanceof ConfigError) console.error(`[arranque] Configuración inválida: ${err.message}`);
+  else console.error('[arranque] No se pudo iniciar el servidor:', err instanceof Error ? err.message : err);
+  process.exit(1);
+});

@@ -1,130 +1,98 @@
-# F1 KeyVault & Fortress | Portal de Bóveda Ultra-Segura
+# F1 KeyVault — Bóveda de Seguridad
 
-Portal corporativo independiente y autónomo diseñado para la gestión y resguardo centralizado de **Contraseñas de Portales** y **Llaves, Tokens y Secretos Técnicos de Infraestructura**, con cifrado de grado militar **AES-256-GCM**, doble barrera de acceso (Login + PIN Maestro de 4 dígitos) y bitácora inmutable de auditoría.
+Portal corporativo para guardar **contraseñas de portales** y **llaves, tokens y secretos técnicos** de F1+.
+Express + PostgreSQL en el servidor, React 19 + Kit F1+ (tema Matrix) en el cliente. Se despliega como un solo servicio en Railway.
 
----
+## Cómo protege los secretos
 
-## 🛡️ Características Principales
+| Capa | Qué hace |
+|---|---|
+| Cifrado en reposo | AES-256-GCM. La clave se deriva una vez al arrancar desde `MASTER_ENCRYPTION_KEY`. Cada valor queda atado a su tabla, registro y campo (AAD): copiar un cifrado a otro registro no sirve. |
+| Sesión | Cookie `HttpOnly`, `SameSite=Strict` y `Secure`. Expira en 8 h. En cada petición se comprueban en la BD el estado, el rol y la versión de sesión, así que cerrar sesión, deshabilitar o cambiar la contraseña la revocan al instante. |
+| PIN personal | Cada usuario tiene su propio PIN de 6 dígitos y su propio bloqueo: 5 intentos fallidos lo bloquean 15 minutos. El contador corre en una transacción con la fila bloqueada, así que las peticiones en paralelo no lo saltan. |
+| Token de bóveda | Cookie `HttpOnly` ligada al usuario y a su sesión. Expira tras 15 min de inactividad (2 h como máximo). "Bloquear" lo invalida en el servidor. |
+| Revelación | El listado no trae secretos. Cada vez que alguien ve, copia o abre un secreto para editarlo, el servidor lo registra **antes** de entregarlo; si no puede registrarlo, no lo entrega. |
+| Bitácora | La base de datos rechaza `UPDATE`, `DELETE` y `TRUNCATE` sobre `vault_audit_logs`. La IP se toma según `TRUST_PROXY`. |
+| Permisos | Los roles son `admin` y `operator`. Cada operador ve solo las llaves de los entornos que se le habilitaron. La papelera y el historial de versiones son solo para administradores. |
+| Segregación | Otorgar el rol admin requiere la aprobación de otro admin. Nadie se cambia a sí mismo rol, estado, contraseña ni PIN desde la gestión de usuarios. El último admin no se puede quitar. |
+| Navegador | CSP estricta (`script-src 'self'`, sin recursos externos), HSTS, `frame-ancestors 'none'`, protección CSRF por cabecera propia y por `Origin`, y límites de peticiones. |
 
-### 1. Separación Arquitectónica de Secretos
-* **🌐 Contraseñas de Portales y Accesos Web:**
-  * Plataformas web, sistemas de clientes, SaaS, correos y paneles de administración.
-  * URL de acceso directo en 1 clic, usuario/correo, contraseña cifrada, generador avanzado de contraseñas (con medidor de entropía), campos adicionales dinámicos (RUT Empresa, Clave secundaria, Preguntas secretas), notas seguras y etiquetas.
-* **🔑 Llaves, Tokens y Secretos Técnicos:**
-  * Almacenamiento especializado para:
-    * `API_KEY`: API Keys y Webhooks de integración.
-    * `TOKEN`: Bearer Tokens, JWT y OAuth Secrets.
-    * `SSH_KEY`: Claves SSH privadas y públicas para servidores y bastiones.
-    * `DATABASE`: Cadenas de conexión DSN y passwords de Bases de Datos.
-    * `PIN_CODE`: PINs numéricos de acceso físico a recintos o tarjetas.
-    * `CERTIFICATE`: Certificados SSL/TLS y licencias de software.
-  * Clasificación por entorno: `PROD` (Producción), `STAGING` (Pre-prod), `QA` (Pruebas) y `DEV` (Desarrollo).
-  * Fecha de expiración y aviso de vencimiento/renovación periódica.
+## Variables de entorno
 
-### 2. Cifrado Autenticado de Grado Militar (AES-256-GCM)
-* Todo dato sensible se cifra en el servidor antes de guardarse en PostgreSQL utilizando **AES-256-GCM**.
-* Clave simétrica derivada mediante **scrypt** a partir de `MASTER_ENCRYPTION_KEY`.
-* Vector de inicialización único de 12 bytes (`iv`) y etiqueta de autenticación de 16 bytes (`authTag`) por cada registro cifrado.
-* Detección inmediata y rechazo ante cualquier manipulación del texto cifrado o la etiqueta.
+Están descritas en [.env.example](.env.example). Las obligatorias son `DATABASE_URL`, `MASTER_ENCRYPTION_KEY` y `JWT_SECRET`: el servidor **no arranca** si falta alguna, si tiene menos de 32 caracteres o si es un valor publicado en versiones anteriores.
 
-### 3. Doble Factor de Acceso (Login + PIN Maestro Verbal)
-* **Paso 1:** Inicio de sesión del usuario con email y contraseña (hasheada con `scrypt`), generando cookie de sesión segura `HttpOnly`.
-* **Paso 2:** Desbloqueo verbal de la bóveda mediante código PIN numérico de 4 dígitos validado en tiempo constante (`crypto.timingSafeEqual`).
-* **Protección Anti-Fuerza Bruta:** Tras 5 intentos fallidos consecutivos, la bóveda se bloquea temporalmente por 15 minutos (`429 Too Many Requests`).
-* **Sesión Efímera:** El desbloqueo emite un token efímero con caducidad automática de 15 minutos por inactividad y botón de bloqueo instantáneo.
+> ⚠️ **Respalda `MASTER_ENCRYPTION_KEY` fuera de Railway.** Sin ella no hay forma de descifrar los datos.
 
-### 4. Blindaje Total Anti-Autocompletado de Navegadores
-* Eliminación definitiva de inyecciones involuntarias del correo del usuario por parte de Chrome / Edge:
-  * Casillas de PIN y buscadores con `autoComplete="one-time-code"`.
-  * Formulario señuelo invisible (*Decoy Trap*) fuera de pantalla.
-  * Modo `readOnly` dinámico hasta foco o clic activo del usuario.
-  * Watchdog nativo a nivel de DOM mediante `useRef` y eventos del navegador.
+### Rotar la clave maestra
+1. Copia el valor actual a `MASTER_ENCRYPTION_KEY_PREVIOUS` y define un valor nuevo en `MASTER_ENCRYPTION_KEY`.
+2. Redespliega. Al arrancar, el servidor re-cifra en segundo plano todo lo que usaba la clave anterior y lo anota en los logs (`[cifrado] Re-cifrado a v2: …`).
+3. Cuando el log confirme que no hubo errores, borra `MASTER_ENCRYPTION_KEY_PREVIOUS` y redespliega.
 
-### 5. Bitácora Inmutable de Auditoría
-* Registro cronológico y detallado de cada acción: inicios de sesión, fallos de clave, desbloqueos de bóveda, revelación de contraseñas, copiado al portapapeles y modificaciones de registros, con marca de tiempo, usuario, dirección IP y User-Agent.
+## Despliegue en Railway
 
-### 6. Gestión de Usuarios y Roles
-* Administración de colaboradores con roles `admin` y `operator`.
-* Creación de usuarios, reseteo de contraseñas y activación/desactivación de cuentas.
+1. Crea el servicio desde el repositorio y agrega un PostgreSQL.
+2. Carga las variables: `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `NODE_ENV=production`, `MASTER_ENCRYPTION_KEY`, `JWT_SECRET` y, solo para el primer arranque con la base vacía, `DEFAULT_ADMIN_EMAIL` y `DEFAULT_ADMIN_PASSWORD`.
+3. Railway usa [railway.json](railway.json): compila con `npm run build`, inicia con `npm start` y revisa `/api/health`, que responde 503 si la BD no contesta.
+4. Al arrancar, el servidor aplica las migraciones pendientes ([server/db/migrations.ts](server/db/migrations.ts)) y re-cifra los datos heredados.
+5. Si la conexión a PostgreSQL falla por un certificado autofirmado, carga la CA en `DATABASE_SSL_CA`. Como último recurso, usa `DATABASE_SSL=no-verify`.
 
----
+### Migrar desde la versión 1.x
+- Las sesiones anteriores dejan de valer: todos vuelven a iniciar sesión.
+- El PIN compartido de 4 dígitos ya no se usa. Cada persona crea su PIN personal en su próximo ingreso, confirmando con su contraseña. La tabla `vault_config` queda sin uso y se eliminará en una versión futura.
+- Las cuentas que seguían con la contraseña publicada en la v1 quedan obligadas a cambiarla al entrar.
+- Revisa en los logs de Railway del primer arranque de la v1 si aparecieron la contraseña inicial o el PIN en texto plano. Si fue así, cámbialos.
 
-## 🚀 Despliegue en Railway (Paso a Paso)
+## Desarrollo local
 
-Este proyecto está 100% optimizado para desplegarse como un servicio único en **Railway** (Node.js + Express + Vite + PostgreSQL).
-
-### Paso 1: Crear el Proyecto en Railway
-1. Inicia sesión en [Railway.app](https://railway.app/).
-2. Haz clic en **"New Project"** -> **"Deploy from GitHub repo"**.
-3. Selecciona el repositorio `desarrollosefeuno-code/Portal_Boveda_Seguridad`.
-
-### Paso 2: Agregar la Base de Datos PostgreSQL
-1. Dentro del proyecto en Railway, presiona el botón **"+ New"** -> **"Database"** -> **"Add PostgreSQL"**.
-2. Railway aprovisionará la base de datos y generará automáticamente la variable `DATABASE_URL`.
-
-### Paso 3: Conectar las Variables de Entorno
-En el servicio del portal (Node.js), dirígete a la pestaña **Variables** y agrega:
-
-| Variable | Descripción | Ejemplo / Valor Recomendado |
-|---|---|---|
-| `DATABASE_URL` | Conexión a Postgres | `${{Postgres.DATABASE_URL}}` (Variable de referencia de Railway) |
-| `NODE_ENV` | Entorno | `production` |
-| `MASTER_ENCRYPTION_KEY` | Llave secreta para cifrado AES-256-GCM | Genera una frase aleatoria de 32 a 64 caracteres |
-| `JWT_SECRET` | Secreto para firmas de sesión | Genera una cadena aleatoria de mínimo 32 caracteres |
-| `DEFAULT_ADMIN_EMAIL` | Correo del Administrador inicial | `admin@f1.services` |
-| `DEFAULT_ADMIN_PASSWORD` | Contraseña inicial del Administrador | `AdminFortress2026!` *(Cámbiala en tu primer acceso)* |
-| `DEFAULT_VAULT_PIN` | PIN inicial de 4 dígitos | `1234` *(Cámbialo en Ajustes de Seguridad)* |
-
-> **Nota:** Railway inyecta la variable `PORT` automáticamente al contenedor.
-
-### Paso 4: Despliegue Automático
-* Railway detectará el archivo [railway.json](railway.json) y compilará la aplicación mediante **Nixpacks**:
-  * Build: `npm run build` (compila el frontend Vite a `dist/client` y el backend a `dist/server`).
-  * Start: `npm start` (ejecuta el servidor Express en `node dist/server/index.js`).
-* Al iniciar, el servidor ejecutará automáticamente `ensureDatabaseSchema()`, creando las tablas, el usuario administrador inicial y el PIN maestro.
-* Asigna un dominio público en Railway (pestaña **Settings** -> **Generate Domain**) y el portal quedará operativo de inmediato.
-
----
-
-## 💻 Desarrollo Local
-
-### Requisitos
-* Node.js v20 o superior.
-* PostgreSQL local o instancia remota (Neon / Railway / Supabase).
-
-### Instalación
 ```bash
-# Instalar dependencias
 npm install
-
-# Copiar variables de entorno
-cp .env.example .env
+cp .env.example .env   # y completa los valores
+npm run dev:server     # API en :3001
+npm run dev            # cliente en :3000 con proxy a /api
 ```
 
-Configura tu `.env` con tu `DATABASE_URL` local.
+Demo sin base de datos, con PostgreSQL en memoria y datos ficticios:
 
-### Ejecución
 ```bash
-# Modo desarrollo con recarga en caliente (Hot Reload)
-# Terminal 1 (Servidor Express en puerto 3001):
-npm run dev:server
-
-# Terminal 2 (Cliente Vite en puerto 3000 con proxy a /api):
-npm run dev
+npm run build:client && npm run dev:demo
 ```
 
-Abre tu navegador en `http://localhost:3000`.
+Las credenciales de demostración están en [scripts/dev-demo.ts](scripts/dev-demo.ts) y solo existen mientras la demo corre.
 
-### Pruebas Automatizadas
+## Pruebas
+
 ```bash
-npm test
+npm test          # criptografía + API completa contra PostgreSQL en memoria (PGlite)
+npm run typecheck
+npm run build
 ```
-Ejecuta la suite criptográfica verificando cifrado AES-256-GCM, rechazo de manipulaciones (AuthTag), hash scrypt y validación en tiempo constante.
 
----
+Las pruebas de API cubren:
+- configuración insegura;
+- bloqueo de login y de PIN, incluso con intentos en paralelo;
+- revocación de sesiones y del token de bóveda;
+- CSRF y orígenes;
+- listado sin secretos y revelación auditada;
+- versiones, papelera e historial;
+- permisos por entorno;
+- inmutabilidad de la bitácora;
+- segregación de funciones.
 
-## 🔒 Estándar de Seguridad
+## Estructura
 
-* **OWASP ASVS Level 2:** Cifrado autenticado para todo dato en reposo, cookies `HttpOnly`, `SameSite=Strict`, prevención de inyecciones SQL con consultas parametrizadas, tokens efímeros firmados y cabeceras estrictas (`nosniff`, `DENY`, `HSTS`).
-* **Calificación SecurityScorecard:** Apto para máxima calificación en seguridad corporativa.
-
+```
+server/
+  config.ts              variables validadas al arrancar
+  app.ts / index.ts      aplicación Express y arranque
+  db/                    conexión, migraciones versionadas, tareas de arranque
+  middleware/            sesión, bóveda, cabeceras, CSRF/CORS, límites
+  routes/                auth, PIN, ítems (contraseñas y llaves), bitácora, usuarios
+  services/              cifrado y bitácora
+  validation.ts          esquemas Zod de toda entrada
+src/
+  components/f1-ui/      Kit F1+ (copiado sin editar, v1.6.0)
+  components/            vistas del portal
+  index.css              tema Matrix sobre los tokens del kit
+tests/                   pruebas (node:test + PGlite)
+scripts/dev-demo.ts      demo local en memoria
+```

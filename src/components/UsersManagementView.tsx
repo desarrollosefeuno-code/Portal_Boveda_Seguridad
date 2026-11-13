@@ -1,370 +1,344 @@
-import React, { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { Ban, KeyRound, Lock, Pencil, ShieldCheck, ShieldMinus, ShieldPlus, Trash2, UserPlus, Users } from 'lucide-react';
 import {
-  Users,
-  Plus,
-  ShieldCheck,
-  Shield,
-  Trash2,
-  Edit2,
-  KeyRound,
-  X,
-  CheckCircle2,
-  UserX,
-  UserCheck,
-} from 'lucide-react';
-import type { User } from '../types/vault.js';
-import { api } from '../services/api.js';
+  ActionMenu,
+  Alert,
+  Badge,
+  Button,
+  CheckboxGroup,
+  CheckboxRow,
+  ConfirmDialog,
+  F1Spinner,
+  Field,
+  Input,
+  Modal,
+  PageHeader,
+  Select,
+  useToast,
+  type MenuAction,
+} from './f1-ui';
+import { api, errorMessage } from '../services/api';
+import { ENVIRONMENTS, type AdminRequest, type Environment, type ManagedUser } from '../types/vault';
+import { formatDateTime } from '../utils/secrets';
+import { generatePassword } from '../utils/passwordGenerator';
 
-interface UsersManagementViewProps {
-  currentUserId?: string;
-  showToast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
+const ENV_LABEL: Record<Environment, string> = { PROD: 'Producción', STAGING: 'Staging', QA: 'QA', DEV: 'Desarrollo' };
+const tempPassword = () => generatePassword({ length: 16, uppercase: true, lowercase: true, numbers: true, symbols: true });
+
+type Confirm = { title: string; message: string; label: string; tone: 'danger' | 'primary'; run: () => Promise<{ message?: string }> };
+
+function EnvironmentPicker({ value, onChange }: { value: Environment[]; onChange: (v: Environment[]) => void }) {
+  return (
+    <CheckboxGroup legend="Entornos de llaves que puede ver">
+      {ENVIRONMENTS.map((env) => (
+        <CheckboxRow key={env} label={ENV_LABEL[env]} checked={value.includes(env)}
+          onChange={(e) => onChange(e.target.checked ? [...value, env] : value.filter((x) => x !== env))} />
+      ))}
+    </CheckboxGroup>
+  );
 }
 
-export const UsersManagementView: React.FC<UsersManagementViewProps> = ({ currentUserId, showToast }) => {
-  const [users, setUsers] = useState<User[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+/** Muestra una contraseña temporal una sola vez, para entregarla al usuario por un canal seguro. */
+function TemporaryPasswordNotice({ password }: { password: string }) {
+  return (
+    <Alert tone="warn" title="Contraseña temporal">
+      <p>Entrégala por un canal seguro; el usuario deberá cambiarla al entrar.</p>
+      <p className="mt-2 select-all break-all rounded-lg bg-surface px-3 py-2 font-mono text-fg">{password}</p>
+    </Alert>
+  );
+}
 
-  // Modal Crear / Editar
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingUser, setEditingUser] = useState<User | null>(null);
+export function UsersManagementView({ currentUserId }: { currentUserId: string }) {
+  const toast = useToast();
+  const [users, setUsers] = useState<ManagedUser[] | null>(null);
+  const [requests, setRequests] = useState<AdminRequest[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<ManagedUser | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [issued, setIssued] = useState<{ email: string; password: string } | null>(null);
 
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [role, setRole] = useState<'admin' | 'operator'>('operator');
-  const [status, setStatus] = useState<'active' | 'disabled'>('active');
-
-  const [isSaving, setIsSaving] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const loadUsers = async () => {
+  const load = useCallback(async () => {
     try {
-      setIsLoading(true);
-      const res = await api.users.list();
-      setUsers(res.users);
-    } catch {
-      showToast('Error al cargar lista de usuarios.', 'error');
-    } finally {
-      setIsLoading(false);
+      const [u, r] = await Promise.all([api.users.list(), api.users.adminRequests()]);
+      setUsers(u.users);
+      setRequests(r.items);
+    } catch (err) {
+      toast.error(errorMessage(err, 'No se pudieron cargar los usuarios.'));
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
-    loadUsers();
-  }, []);
+    load();
+  }, [load]);
 
-  const handleOpenCreate = () => {
-    setEditingUser(null);
-    setName('');
-    setEmail('');
-    setPassword('');
-    setRole('operator');
-    setStatus('active');
-    setErrorMessage(null);
-    setIsModalOpen(true);
-  };
-
-  const handleOpenEdit = (user: User) => {
-    setEditingUser(user);
-    setName(user.name);
-    setEmail(user.email);
-    setPassword('');
-    setRole(user.role);
-    setStatus(user.status);
-    setErrorMessage(null);
-    setIsModalOpen(true);
-  };
-
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim() || !email.trim()) {
-      setErrorMessage('Nombre y correo son requeridos.');
-      return;
-    }
-
+  const runConfirm = async () => {
+    if (!confirm) return;
+    setBusy(true);
     try {
-      setIsSaving(true);
-      setErrorMessage(null);
-
-      if (editingUser) {
-        await api.users.update(editingUser.id, {
-          name: name.trim(),
-          role,
-          status,
-          newPassword: password.trim() || undefined,
-        });
-        showToast('Usuario actualizado exitosamente.', 'success');
-      } else {
-        if (!password.trim()) {
-          setErrorMessage('Debes asignar una contraseña inicial al usuario.');
-          return;
-        }
-        await api.users.create({
-          email: email.trim().toLowerCase(),
-          name: name.trim(),
-          password: password.trim(),
-          role,
-        });
-        showToast('Usuario creado exitosamente.', 'success');
-      }
-
-      setIsModalOpen(false);
-      await loadUsers();
-    } catch (err: any) {
-      setErrorMessage(err?.message || 'Error al guardar usuario.');
+      const res = await confirm.run();
+      toast.success(res.message || 'Listo.');
+      setConfirm(null);
+      load();
+    } catch (err) {
+      toast.error(errorMessage(err));
     } finally {
-      setIsSaving(false);
+      setBusy(false);
     }
   };
 
-  const handleDelete = async (user: User) => {
-    if (!confirm(`¿Estás seguro de eliminar al usuario ${user.email}?`)) return;
+  const decide = async (r: AdminRequest, approve: boolean) => {
     try {
-      await api.users.delete(user.id);
-      showToast('Usuario eliminado exitosamente.', 'success');
-      await loadUsers();
-    } catch (err: any) {
-      showToast(err?.message || 'Error al eliminar usuario.', 'error');
+      const res = approve ? await api.users.approve(r.id) : await api.users.reject(r.id);
+      toast.success(res.message || 'Listo.');
+      load();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  };
+
+  const pending = requests.filter((r) => r.status === 'pending');
+  const admins = users?.filter((u) => u.role === 'admin' && u.status === 'active').length ?? 0;
+
+  const actionsFor = (u: ManagedUser): MenuAction[] => {
+    const self = u.id === currentUserId;
+    const list: MenuAction[] = [{ label: 'Editar', icon: Pencil, onSelect: () => setEditing(u) }];
+    if (self) return list;
+    list.push({
+      label: 'Asignar contraseña temporal',
+      icon: KeyRound,
+      onSelect: () => {
+        const password = tempPassword();
+        setConfirm({
+          title: `Resetear la contraseña de ${u.email}`,
+          message: 'Se cerrarán sus sesiones y deberá entrar con una contraseña temporal que verás a continuación.',
+          label: 'Resetear contraseña',
+          tone: 'primary',
+          run: async () => {
+            const res = await api.users.resetPassword(u.id, password);
+            setIssued({ email: u.email, password });
+            return res;
+          },
+        });
+      },
+    });
+    if (u.hasPin) {
+      list.push({
+        label: 'Resetear PIN',
+        icon: Lock,
+        onSelect: () => setConfirm({ title: `Resetear el PIN de ${u.email}`, message: 'Deberá crear un PIN nuevo con su contraseña la próxima vez que abra la bóveda.', label: 'Resetear PIN', tone: 'primary', run: () => api.users.resetPin(u.id) }),
+      });
+    }
+    if (u.role === 'admin') {
+      list.push({
+        label: 'Quitar rol admin',
+        icon: ShieldMinus,
+        onSelect: () => setConfirm({ title: `Quitar el rol admin a ${u.email}`, message: 'Pasará a operador y se cerrarán sus sesiones.', label: 'Quitar rol', tone: 'danger', run: () => api.users.demote(u.id) }),
+      });
+    } else if (u.status === 'active') {
+      list.push({
+        label: admins <= 1 ? 'Hacer administrador' : 'Solicitar rol admin',
+        icon: ShieldPlus,
+        onSelect: () =>
+          setConfirm({
+            title: `Rol admin para ${u.email}`,
+            message: admins <= 1 ? 'Eres el único administrador: el rol se otorgará directamente y quedará registrado.' : 'Se creará una solicitud que debe aprobar otro administrador.',
+            label: admins <= 1 ? 'Otorgar rol' : 'Crear solicitud',
+            tone: 'primary',
+            run: () => api.users.requestAdmin(u.id),
+          }),
+      });
+    }
+    list.push({
+      label: 'Eliminar',
+      icon: Trash2,
+      danger: true,
+      onSelect: () => setConfirm({ title: `Eliminar a ${u.email}`, message: 'La cuenta se borra; sus eventos siguen en la bitácora. Si solo quieres quitarle el acceso, deshabilítala.', label: 'Eliminar usuario', tone: 'danger', run: () => api.users.remove(u.id) }),
+    });
+    return list;
+  };
+
+  return (
+    <section className="grid gap-5">
+      <PageHeader
+        icon={Users}
+        title="Usuarios y permisos"
+        description="Crea cuentas con contraseña temporal, define qué entornos de llaves ve cada uno y gestiona el rol de administrador. Otorgar ese rol requiere la aprobación de otro administrador."
+        stats={users ? [{ label: 'Usuarios', value: users.length }, { label: 'Administradores activos', value: admins }, { label: 'Solicitudes pendientes', value: pending.length, warn: pending.length > 0 }] : undefined}
+        actions={<Button icon={UserPlus} onClick={() => setCreating(true)}>Nuevo usuario</Button>}
+      />
+
+      {issued && (
+        <div className="grid gap-2">
+          <TemporaryPasswordNotice password={issued.password} />
+          <Button variant="secondary" className="w-fit" onClick={() => setIssued(null)}>Ya la entregué, ocultar</Button>
+        </div>
+      )}
+
+      {pending.length > 0 && (
+        <div className="grid gap-3 rounded-2xl border border-warn-line bg-warn-soft p-4">
+          <h3 className="font-bold text-warn">Solicitudes de rol administrador</h3>
+          {pending.map((r) => {
+            const mine = r.requestedBy === currentUserId;
+            return (
+              <div key={r.id} className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-3 sm:flex-row sm:items-center">
+                <p className="flex-1 text-sm text-fg">
+                  <strong>{r.targetName}</strong> ({r.targetEmail}) · pedida por {r.requestedByEmail} el {formatDateTime(r.createdAt)}
+                </p>
+                <div className="flex gap-2">
+                  {!mine && r.targetUserId !== currentUserId && <Button size="sm" icon={ShieldCheck} onClick={() => decide(r, true)}>Aprobar</Button>}
+                  <Button size="sm" variant="secondary" onClick={() => decide(r, false)}>{mine ? 'Cancelar' : 'Rechazar'}</Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!users ? (
+        <div className="grid place-items-center py-16"><F1Spinner size="md" text="Cargando usuarios…" /></div>
+      ) : (
+        <ul className="grid gap-3">
+          {users.map((u) => (
+            <li key={u.id} className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <p className="flex flex-wrap items-center gap-2 font-bold text-fg">
+                  {u.name}
+                  {u.id === currentUserId && <Badge tone="brand">Tú</Badge>}
+                </p>
+                <p className="truncate text-sm text-fg-2">{u.email}</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <Badge tone={u.role === 'admin' ? 'brand' : 'neutral'} icon={u.role === 'admin' ? ShieldCheck : undefined}>{u.role === 'admin' ? 'Administrador' : 'Operador'}</Badge>
+                  <Badge tone={u.status === 'active' ? 'ok' : 'bad'} icon={u.status === 'active' ? undefined : Ban}>{u.status === 'active' ? 'Activo' : 'Deshabilitado'}</Badge>
+                  {!u.hasPin && <Badge tone="warn">Sin PIN</Badge>}
+                  {u.mustChangePassword && <Badge tone="info">Contraseña temporal</Badge>}
+                  {u.locked && <Badge tone="bad" icon={Lock}>Bloqueado temporalmente</Badge>}
+                  {u.role !== 'admin' && <Badge tone="neutral">Llaves: {u.keyEnvironments.map((e) => ENV_LABEL[e]).join(', ') || 'ninguna'}</Badge>}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-fg-3">Último acceso: {formatDateTime(u.lastLoginAt)}</span>
+                <ActionMenu label={`Acciones de ${u.email}`} actions={actionsFor(u)} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <CreateUserModal open={creating} onClose={() => setCreating(false)} onCreated={(email, password) => { setIssued({ email, password }); load(); }} />
+      <EditUserModal user={editing} isSelf={editing?.id === currentUserId} onClose={() => setEditing(null)} onSaved={load} />
+      <ConfirmDialog
+        open={!!confirm}
+        onClose={() => setConfirm(null)}
+        title={confirm?.title ?? ''}
+        message={confirm?.message ?? ''}
+        actions={[
+          { label: confirm?.label ?? 'Confirmar', tone: confirm?.tone ?? 'primary', onClick: runConfirm, loading: busy },
+          { label: 'Cancelar', tone: 'neutral', onClick: () => setConfirm(null) },
+        ]}
+      />
+    </section>
+  );
+}
+
+function CreateUserModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (email: string, password: string) => void }) {
+  const toast = useToast();
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
+  const [envs, setEnvs] = useState<Environment[]>(['DEV', 'QA']);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setEmail('');
+      setName('');
+      setEnvs(['DEV', 'QA']);
+      setError(null);
+    }
+  }, [open]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    const temporaryPassword = tempPassword();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.users.create({ email: email.trim(), name: name.trim(), temporaryPassword, keyEnvironments: envs });
+      toast.success(res.message || 'Usuario creado.');
+      onCreated(email.trim().toLowerCase(), temporaryPassword);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Cabecera */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-xl font-bold text-white tracking-tight font-display">
-              Gestión de Usuarios y Accesos
-            </h2>
-            <span className="px-2.5 py-0.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-bold">
-              {users.length} Usuarios
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Administra qué colaboradores pueden iniciar sesión en el portal y sus privilegios operativos.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleOpenCreate}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Nuevo Usuario</span>
-        </button>
-      </div>
-
-      {/* Tabla de Usuarios */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-300">
-            <thead className="bg-slate-950/80 text-[10px] uppercase font-bold tracking-wider text-slate-400 border-b border-slate-800">
-              <tr>
-                <th className="px-5 py-3.5">Colaborador / Correo</th>
-                <th className="px-5 py-3.5">Rol de Seguridad</th>
-                <th className="px-5 py-3.5">Estado</th>
-                <th className="px-5 py-3.5">Último Acceso</th>
-                <th className="px-5 py-3.5 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 font-medium">
-              {users.map((u) => {
-                const isAdmin = u.role === 'admin';
-                const isSelf = u.id === currentUserId;
-
-                return (
-                  <tr key={u.id} className="hover:bg-slate-850/50 transition-colors">
-                    <td className="px-5 py-3.5">
-                      <div className="font-bold text-white">{u.name}</div>
-                      <div className="text-slate-400 font-mono text-[11px]">{u.email}</div>
-                    </td>
-
-                    <td className="px-5 py-3.5">
-                      <span
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold ${
-                          isAdmin
-                            ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30'
-                            : 'bg-slate-800 text-slate-300 border-slate-700'
-                        }`}
-                      >
-                        {isAdmin ? <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" /> : <Shield className="w-3.5 h-3.5 text-slate-400" />}
-                        <span>{isAdmin ? 'Administrador' : 'Operador'}</span>
-                      </span>
-                    </td>
-
-                    <td className="px-5 py-3.5">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${
-                          u.status === 'active'
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                        }`}
-                      >
-                        {u.status === 'active' ? 'Activo' : 'Deshabilitado'}
-                      </span>
-                    </td>
-
-                    <td className="px-5 py-3.5 font-mono text-[11px] text-slate-400 whitespace-nowrap">
-                      {u.last_login_at
-                        ? new Date(u.last_login_at).toLocaleString('es-CL', {
-                            day: '2-digit',
-                            month: '2-digit',
-                            year: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })
-                        : 'Nunca'}
-                    </td>
-
-                    <td className="px-5 py-3.5 text-right whitespace-nowrap">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEdit(u)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 hover:bg-slate-800 transition-colors cursor-pointer"
-                          title="Editar usuario o resetear clave"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        {!isSelf && (
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(u)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
-                            title="Eliminar usuario"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Modal Crear / Editar Usuario */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl p-6 space-y-4 animate-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-base font-bold text-white font-display">
-                {editingUser ? 'Editar Usuario' : 'Nuevo Usuario'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {errorMessage && (
-              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs">
-                {errorMessage}
-              </div>
-            )}
-
-            <form onSubmit={handleSave} className="space-y-3.5">
-              <div className="space-y-1">
-                <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                  Nombre Completo *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ej: Carlos Inostroza"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                  Correo Electrónico *
-                </label>
-                <input
-                  type="email"
-                  required
-                  disabled={Boolean(editingUser)}
-                  placeholder="usuario@f1.services"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                  {editingUser ? 'Nueva Contraseña (dejar en blanco para no cambiar)' : 'Contraseña Inicial *'}
-                </label>
-                <input
-                  type="password"
-                  placeholder={editingUser ? '••••••••' : 'Mínimo 8 caracteres...'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div className="space-y-1">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                    Rol
-                  </label>
-                  <select
-                    value={role}
-                    onChange={(e) => setRole(e.target.value as any)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="operator">Operador</option>
-                    <option value="admin">Administrador</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                    Estado
-                  </label>
-                  <select
-                    value={status}
-                    onChange={(e) => setStatus(e.target.value as any)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="active">Activo</option>
-                    <option value="disabled">Deshabilitado</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSaving}
-                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 cursor-pointer disabled:opacity-50"
-                >
-                  {isSaving ? 'Guardando...' : editingUser ? 'Actualizar' : 'Crear Usuario'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
+    <Modal open={open} onClose={onClose} title="Nuevo usuario" subtitle="Se crea como operador con una contraseña temporal" icon={<UserPlus size={20} />}
+      footer={<><Button variant="secondary" onClick={onClose}>Cancelar</Button><Button type="submit" form="create-user" loading={busy} loadingText="Creando…">Crear usuario</Button></>}>
+      <form id="create-user" onSubmit={submit} className="grid gap-4" noValidate>
+        {error && <Alert tone="bad">{error}</Alert>}
+        <Field label="Correo" required>{(f) => <Input {...f} type="email" autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} />}</Field>
+        <Field label="Nombre" required>{(f) => <Input {...f} value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />}</Field>
+        <EnvironmentPicker value={envs} onChange={setEnvs} />
+        <p className="text-xs text-fg-3">La contraseña temporal se genera al crear y se muestra una sola vez. Para hacerlo administrador, usa la acción "Solicitar rol admin".</p>
+      </form>
+    </Modal>
   );
-};
+}
 
+function EditUserModal({ user, isSelf, onClose, onSaved }: { user: ManagedUser | null; isSelf: boolean; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const [name, setName] = useState('');
+  const [status, setStatus] = useState<'active' | 'disabled'>('active');
+  const [envs, setEnvs] = useState<Environment[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      setName(user.name);
+      setStatus(user.status);
+      setEnvs(user.keyEnvironments);
+      setError(null);
+    }
+  }, [user]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.users.update(user.id, { name: name.trim(), status, keyEnvironments: envs });
+      toast.success(res.message || 'Usuario actualizado.');
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open={!!user} onClose={onClose} title="Editar usuario" subtitle={user?.email} icon={<Pencil size={20} />}
+      footer={<><Button variant="secondary" onClick={onClose}>Cancelar</Button><Button type="submit" form="edit-user" loading={busy} loadingText="Guardando…">Guardar</Button></>}>
+      <form id="edit-user" onSubmit={submit} className="grid gap-4" noValidate>
+        {error && <Alert tone="bad">{error}</Alert>}
+        <Field label="Nombre" required>{(f) => <Input {...f} value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />}</Field>
+        <Field label="Estado" help={isSelf ? 'No puedes cambiar el estado de tu propia cuenta.' : 'Deshabilitar cierra sus sesiones de inmediato.'}>
+          {(f) => (
+            <Select {...f} value={status} disabled={isSelf} onChange={(e) => setStatus(e.target.value as 'active' | 'disabled')}>
+              <option value="active">Activo</option>
+              <option value="disabled">Deshabilitado</option>
+            </Select>
+          )}
+        </Field>
+        {user?.role !== 'admin' ? <EnvironmentPicker value={envs} onChange={setEnvs} /> : <p className="text-sm text-fg-2">Los administradores ven las llaves de todos los entornos.</p>}
+      </form>
+    </Modal>
+  );
+}

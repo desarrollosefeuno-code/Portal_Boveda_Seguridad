@@ -1,0 +1,236 @@
+/*
+ * Kit F1+ UI — tokens (Tailwind v4). Estándar visual F1+ v2, decisiones D1, D2 y D18.
+ * Uso: en el CSS principal del portal, después de @import "tailwindcss": @import "./components/f1-ui/tokens.css";
+ *
+ * Reglas:
+ * - Los componentes usan solo clases semánticas (bg-surface, text-fg, bg-action…): cambian solas con el tema.
+ * - Prohibidas las clases dark: sueltas y los colores escritos a mano.
+ * - El tema se elige con data-theme="light" | "dark" en <html> (ver theme.ts). Sin atributo = claro.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --font-sans: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', 'Inter Variable', sans-serif;
+
+  /* Escala de marca (fija en ambos temas). #FF5F00 = Pantone Orange 021. */
+  --color-primary-50: #fff5ed;
+  --color-primary-100: #ffeadb;
+  --color-primary-200: #ffd0b0;
+  --color-primary-300: #ffaf7d;
+  --color-primary-400: #ff8640;
+  --color-primary-500: #ff5f00;
+  --color-primary-600: #eb5c00;
+  --color-primary-700: #c24500;
+  --color-primary-800: #a04100;
+  --color-primary-900: #813705;
+  --color-primary-950: #461900;
+
+  /* Paleta corporativa fija */
+  --color-ink: #615d59;     /* Pantone Black U */
+  --color-support: #69aae1; /* Color de apoyo: información y selección (decorativo, 2,5:1) */
+}
+
+/* Colores semánticos: cambian con el tema */
+@theme inline {
+  --color-page: var(--f1-page);
+  --color-surface: var(--f1-surface);
+  --color-surface-2: var(--f1-surface-2);
+  --color-hover: var(--f1-hover);
+  --color-line: var(--f1-line);
+  --color-line-soft: var(--f1-line-soft);
+  --color-line-strong: var(--f1-line-strong);
+  --color-fg: var(--f1-fg);
+  --color-fg-2: var(--f1-fg-2);
+  --color-fg-3: var(--f1-fg-3);
+
+  --color-action: var(--f1-action);
+  --color-action-hover: var(--f1-action-hover);
+  --color-brand: var(--f1-brand);
+  --color-brand-soft: var(--f1-brand-soft);
+  --color-brand-line: var(--f1-brand-line);
+  --color-cream: var(--f1-cream);
+
+  --color-header: var(--f1-header);
+  --color-thead: var(--f1-thead);
+  --color-thead-hover: var(--f1-thead-hover);
+
+  --color-support-fg: var(--f1-support-fg);
+  --color-support-soft: var(--f1-support-soft);
+  --color-support-line: var(--f1-support-line);
+
+  --color-ok: var(--f1-ok);
+  --color-ok-soft: var(--f1-ok-soft);
+  --color-ok-line: var(--f1-ok-line);
+  --color-warn: var(--f1-warn);
+  --color-warn-soft: var(--f1-warn-soft);
+  --color-warn-line: var(--f1-warn-line);
+  --color-bad: var(--f1-bad);
+  --color-bad-soft: var(--f1-bad-soft);
+  --color-bad-line: var(--f1-bad-line);
+  --color-danger: var(--f1-danger);
+  --color-danger-hover: var(--f1-danger-hover);
+  --color-info: var(--f1-support-fg);
+  --color-info-soft: var(--f1-support-soft);
+  --color-info-line: var(--f1-support-line);
+  --color-neutral: var(--f1-neutral);
+  --color-neutral-soft: var(--f1-neutral-soft);
+  --color-neutral-line: var(--f1-neutral-line);
+
+  --color-tip: var(--f1-tip);
+  --color-tip-fg: var(--f1-tip-fg);
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --f1-page: #f1f5f9;
+    --f1-surface: #ffffff;
+    --f1-surface-2: #f8fafc;
+    --f1-hover: #f1f5f9;
+    --f1-line: #e2e8f0;
+    --f1-line-soft: #f1f5f9;
+    --f1-line-strong: #94a3b8;
+    --f1-fg: #0f172a;
+    --f1-fg-2: #475569;
+    --f1-fg-3: #5b6577;
+    --f1-action: #c24500;        /* botones con texto blanco (5,1:1) */
+    --f1-action-hover: #a04100;
+    --f1-brand: #c24500;         /* naranja como texto o ícono */
+    --f1-brand-soft: #fff5ed;
+    --f1-brand-line: #ffd0b0;
+    --f1-cream: #fff7ee;
+    --f1-header: #615d59;
+    --f1-thead: #615d59;
+    --f1-thead-hover: #4b4744;
+    --f1-support-fg: #245f8f;
+    --f1-support-soft: #eef6fc;
+    --f1-support-line: #c6e0f5;
+    --f1-ok: #065f46;      --f1-ok-soft: #ecfdf5;    --f1-ok-line: #a7f3d0;
+    --f1-warn: #92400e;    --f1-warn-soft: #fffbeb;  --f1-warn-line: #fde68a;
+    --f1-bad: #b91c1c;     --f1-bad-soft: #fef2f2;   --f1-bad-line: #fecaca;
+    --f1-danger: #b91c1c;  --f1-danger-hover: #991b1b;
+    --f1-neutral: #334155; --f1-neutral-soft: #f1f5f9; --f1-neutral-line: #e2e8f0;
+    --f1-tip: #1e293b;     --f1-tip-fg: #ffffff;
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --f1-page: #171513;
+    --f1-surface: #221f1d;
+    --f1-surface-2: #1c1a18;
+    --f1-hover: #2a2725;
+    --f1-line: #3a3633;
+    --f1-line-soft: #2c2826;
+    --f1-line-strong: #6b645e;
+    --f1-fg: #f5f3f1;
+    --f1-fg-2: #d0cac4;
+    --f1-fg-3: #a8a29c;
+    --f1-action: #c24500;
+    --f1-action-hover: #a04100;
+    --f1-brand: #ff8a4c;
+    --f1-brand-soft: #36210f;
+    --f1-brand-line: #6b3412;
+    --f1-cream: #2c221a;
+    --f1-header: #2b2826;
+    --f1-thead: #34302d;
+    --f1-thead-hover: #403b37;
+    --f1-support-fg: #8cc0ea;
+    --f1-support-soft: #142738;
+    --f1-support-line: #2a4b66;
+    --f1-ok: #6ee7b7;      --f1-ok-soft: #0f2a21;    --f1-ok-line: #1f5c45;
+    --f1-warn: #fcd34d;    --f1-warn-soft: #2f220b;  --f1-warn-line: #6b4a12;
+    --f1-bad: #fca5a5;     --f1-bad-soft: #351414;   --f1-bad-line: #7f1d1d;
+    --f1-danger: #b91c1c;  --f1-danger-hover: #991b1b;
+    --f1-neutral: #d6d1cc; --f1-neutral-soft: #2e2a27; --f1-neutral-line: #45403c;
+    --f1-tip: #45403c;     --f1-tip-fg: #ffffff;
+  }
+
+  body { background-color: var(--color-page); color: var(--color-fg); font-family: var(--font-sans); }
+  h1, h2, h3, h4 { font-family: var(--font-display); }
+  *, ::after, ::before, ::backdrop, ::file-selector-button { border-color: var(--color-line); }
+  input::placeholder, textarea::placeholder { color: var(--color-fg-3); }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  /* Controles nativos (opción única, rangos, barras de progreso) con el naranja de acción */
+  input[type="radio"], input[type="range"], progress { accent-color: var(--color-action); }
+  /* Foco visible y consistente para teclado (WCAG 2.4.7) */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-primary-500);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes f1-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes f1-scale-in { from { transform: scale(0.97); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@keyframes f1-sheet-in { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@utility animate-f1-fade { animation: f1-fade-in .2s ease-out both; }
+@utility animate-f1-scale { animation: f1-scale-in .18s ease-out both; }
+@utility animate-f1-sheet { animation: f1-sheet-in .22s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .animate-f1-fade, .animate-f1-scale, .animate-f1-sheet { animation: none; }
+}
+
+/* Spinner corporativo F1+ */
+@keyframes spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes f1-breathe {
+  0%, 100% {
+    transform: scale(0.94);
+    opacity: 0.92;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+}
+
+@keyframes f1-pulse-glow {
+  0%, 100% {
+    transform: scale(0.85);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.75;
+  }
+}
+
+@keyframes f1-progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-spin-reverse {
+  animation: spin-reverse 2.4s linear infinite;
+}
+
+.animate-spin-slow {
+  animation: spin 3s linear infinite;
+}
+
+.animate-f1-breathe {
+  animation: f1-breathe 2s ease-in-out infinite;
+}
+
+.animate-f1-pulse-glow {
+  animation: f1-pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-f1-progress {
+  animation: f1-progress-slide 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-slow, .animate-spin-reverse, .animate-f1-breathe, .animate-f1-pulse-glow, .animate-f1-progress { animation: none; }
+}

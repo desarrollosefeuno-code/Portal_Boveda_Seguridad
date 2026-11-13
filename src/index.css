@@ -1,50 +1,104 @@
 @import "tailwindcss";
+@import "./components/f1-ui/tokens.css";
+@import "@fontsource-variable/jetbrains-mono";
+@source "./";
+
+/*
+ * Tema Matrix de la Bóveda (único tema del portal).
+ * El Kit F1+ no se edita: aquí solo se redefinen sus tokens --f1-* y la escala primaria, así todos los
+ * componentes del kit toman el aspecto Matrix sin clases de color escritas a mano (regla 8 del AGENTS.md).
+ * Contrastes verificados (WCAG AA): fg 18,2:1, fg-2 15,3:1, fg-3 9,2:1 sobre surface; texto blanco sobre action 5,5:1 y sobre danger 6,5:1.
+ */
+@theme {
+  --font-sans: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  --font-display: 'JetBrains Mono Variable', ui-monospace, 'Consolas', monospace;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Consolas', monospace;
+
+  --color-primary-50: #e9ffef;
+  --color-primary-100: #c8ffd6;
+  --color-primary-200: #93ffad;
+  --color-primary-300: #5cff86;
+  --color-primary-400: #39ff6a;
+  --color-primary-500: #39ff6a;
+  --color-primary-600: #1fd453;
+  --color-primary-700: #0b7a33;
+  --color-primary-800: #096429;
+  --color-primary-900: #064a1e;
+  --color-primary-950: #022b10;
+}
 
 @layer base {
-  :root {
-    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
+  :root,
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --f1-page: #000300;
+    --f1-surface: #020c05;
+    --f1-surface-2: #010802;
+    --f1-hover: #06200f;
+    --f1-line: #0f3d1f;
+    --f1-line-soft: #0a2914;
+    --f1-line-strong: #1f7a3d;
+    --f1-fg: #d7ffe0;
+    --f1-fg-2: #9df5b4;
+    --f1-fg-3: #62c47c;
+    --f1-action: #0b7a33;
+    --f1-action-hover: #096429;
+    --f1-brand: #39ff6a;
+    --f1-brand-soft: #052a12;
+    --f1-brand-line: #11592a;
+    --f1-cream: #031a0b;
+    --f1-header: #010703;
+    --f1-thead: #052512;
+    --f1-thead-hover: #0a3319;
+    --f1-support-fg: #7fe3ff;
+    --f1-support-soft: #04202a;
+    --f1-support-line: #0d4a5c;
+    --f1-ok: #5cff8f;      --f1-ok-soft: #052a12;    --f1-ok-line: #11592a;
+    --f1-warn: #e8ff5c;    --f1-warn-soft: #1f2304;  --f1-warn-line: #565d0e;
+    --f1-bad: #ff7b7b;     --f1-bad-soft: #2a0808;   --f1-bad-line: #6b1a1a;
+    --f1-danger: #b3261e;  --f1-danger-hover: #8f1d17;
+    --f1-neutral: #b8e6c4; --f1-neutral-soft: #0a1f10; --f1-neutral-line: #1d4a2a;
+    --f1-tip: #062512;     --f1-tip-fg: #d7ffe0;
   }
 
-  body {
-    font-family: var(--font-sans);
+  html { background-color: var(--color-page); }
+  body { font-feature-settings: "calt" 0; letter-spacing: 0.01em; }
+  ::selection { background: var(--color-brand); color: var(--color-page); }
+  /* Barra de desplazamiento al tono del tema */
+  * { scrollbar-color: var(--color-line-strong) var(--color-page); }
+}
+
+/* Brillo de fósforo en títulos y valores destacados */
+@utility matrix-glow {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--color-brand) 55%, transparent), 0 0 18px color-mix(in srgb, var(--color-brand) 25%, transparent);
+}
+
+/* Borde con halo verde para tarjetas activas */
+@utility matrix-frame {
+  box-shadow: 0 0 0 1px var(--color-brand-line), 0 0 24px -8px color-mix(in srgb, var(--color-brand) 45%, transparent);
+}
+
+/* Líneas de barrido de monitor CRT, muy tenues y sin capturar clics */
+.matrix-scanlines {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: repeating-linear-gradient(to bottom, transparent 0 2px, color-mix(in srgb, var(--color-brand) 4%, transparent) 2px 3px);
+}
+
+@keyframes matrix-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@utility matrix-caret {
+  &::after {
+    content: '_';
+    margin-left: 0.1em;
+    animation: matrix-caret 1.1s steps(1) infinite;
   }
-
-  code, pre, .font-mono {
-    font-family: var(--font-mono);
-  }
 }
 
-/* Scrollbars estilizadas cibernéticas */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.4);
-  border-radius: 9999px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.7);
-}
+@keyframes matrix-decode { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
+@utility animate-matrix-in { animation: matrix-decode .35s ease-out both; }
 
-/* Efectos de brillo de seguridad (Cyber Glow) */
-.glow-primary {
-  box-shadow: 0 0 20px -3px rgba(99, 102, 241, 0.35);
+@media (prefers-reduced-motion: reduce) {
+  .matrix-caret::after, .animate-matrix-in { animation: none; }
 }
-
-.glow-emerald {
-  box-shadow: 0 0 20px -3px rgba(16, 185, 129, 0.35);
-}
-
-.glow-amber {
-  box-shadow: 0 0 20px -3px rgba(245, 158, 11, 0.35);
-}
-
-.glow-rose {
-  box-shadow: 0 0 20px -3px rgba(244, 63, 94, 0.35);
-}
-
